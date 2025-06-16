@@ -1,0 +1,194 @@
+---
+title: "Untitled"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Setup
+```{r}
+#BiocManager::install("singscore")
+library(survival)
+library(dplyr)
+library(survminer)
+library(R.matlab)
+library(stringr)
+library(ggplot2)
+library(xlsx)
+library(singscore)
+library(GSVA)
+setwd("E:\\Documents\\NYU\\NYU Langone\\PhD\\Feske Lab\\Experiments\\04.10.19_CancerDatabases&Analysis\\R")
+
+```
+
+Load TCGA data
+- need to also load clinical data
+- need to isolate single patients
+```{r}
+
+fname <- "E:\\Documents\\NYU\\NYU Langone\\PhD\\Feske Lab\\Experiments\\04.10.19_CancerDatabases&Analysis\\R\\Data\\20200430_workspace_tcgaLeuk.mat"
+genesFile <- "E:\\Documents\\NYU\\NYU Langone\\PhD\\Feske Lab\\Experiments\\04.10.19_CancerDatabases&Analysis\\R\\Data\\tcgaGenes.xlsx"
+clinFile <- "E:\\Documents\\NYU\\NYU Langone\\PhD\\Feske Lab\\Experiments\\04.10.19_CancerDatabases&Analysis\\R\\Data\\tcgaClinical.xlsx"
+cellQueries <- c("'T lymphoblastic leukemia/lymphoma'",
+                 "'Precursor B-cell lymphoblastic leukemia'")
+
+
+matVar <- readMat(fname)
+
+tcgaLeuk <- matVar$tcgaLeuk
+annot <- read.xlsx(clinFile,
+                   sheetIndex=1)
+rm(matVar)
+
+# Extracts count data
+values <- tcgaLeuk[[1]]
+
+# Extracts gene information
+genes <- read.xlsx(genesFile,
+                   sheetIndex=1,
+                   header=FALSE)
+geneLen <- genes[,3]
+genes <- genes[,1]
+
+# Organizes information
+rownames(values) <- genes
+ids <- colnames(values,
+                do.NULL=FALSE)
+removeInd <- which(duplicated(genes))
+genes <- genes[-removeInd]
+values <- values[-removeInd,]
+geneLen <- geneLen[-removeInd]
+
+removeInd <- which(geneLen==0)
+values <- values[-removeInd,]
+genes <- genes[-removeInd]
+geneLen <- geneLen[-removeInd]
+
+rm(tcgaLeuk)
+
+# Acquires appropriate cell-types
+include <- c()
+for (i in 1:length(cellQueries)) {
+  cellQuery <- cellQueries[i]
+  loc <- which(annot["X.primary_diagnosis."]==cellQuery)
+  include <- c(include,loc)
+}
+annot <- annot[include,]
+values <- values[,include]
+ids <- ids[include]
+
+
+```
+
+Singscore + correlation analysis
+```{r}
+
+geneSetUPFile <- "E:\\Documents\\NYU\\NYU Langone\\PhD\\Feske Lab\\Experiments\\04.10.19_CancerDatabases&Analysis\\Data\\20200430_GeneSets\\MSigDB_SkeletalMuscleContraction.txt"
+geneSetDNFile <- "E:\\Documents\\NYU\\NYU Langone\\PhD\\Feske Lab\\Experiments\\04.10.19_CancerDatabases&Analysis\\Data\\20200430_GeneSets\\MSigDB_NOTCH1targets_DN.txt"
+
+# Load gene set
+geneSetUP <- read.table(geneSetUPFile)
+geneSetUP <- as.character(as.matrix(geneSetUP))
+geneSetDN <- read.table(geneSetDNFile)
+geneSetDN <- as.character(as.matrix(geneSetDN))
+
+# Convert values to TPM
+tpmOut <- values
+tpmOut <- tpmOut/(geneLen/10^3)
+normFac <- colSums(tpmOut)
+for (i in 1:length(tpmOut[1,])) {
+  val <- tpmOut[,i]/(normFac[i]/10^6)
+  tpmOut[,i] <- val
+}
+tpmOut <- log10(tpmOut+1)
+
+# Performs multiple scoring (with singscore)
+singScores <- c()
+dispOut <- c()
+for (i in 1:length(tpmOut[1,])) {
+  val <- as.matrix(tpmOut[,i])
+  ranked <- rankGenes(val)
+  score <- simpleScore(ranked,
+                       upSet=geneSetUP,
+                       #=geneSetDN)
+                       centerScore=FALSE,
+                       knownDirection=FALSE)
+                       
+  singScores <- c(singScores, score[[1]])
+  dispOut <- c(dispOut, score[[2]])
+}
+
+# Performs multiple scoring (with GSVA)
+GSVAscores <- gsva(tpmOut,
+                   gset.idx.list=list(geneSetUP),
+                   method="ssgsea")
+GSVAscores <- t(GSVAscores)
+
+# Plots
+ind1 <- which(annot["X.primary_diagnosis."]=="'T lymphoblastic leukemia/lymphoma'")
+ind2 <- which(annot["X.primary_diagnosis."]=="'Precursor B-cell lymphoblastic leukemia'")
+scores1 <- GSVAscores[ind1]
+scores2 <- GSVAscores[ind2]
+
+testOut = t.test(scores1,scores2)
+testOut[3]
+abs(testOut[[5]][1]-testOut[[5]][2])
+
+xMin <- min(c(scores1,scores2)) - 0.001
+xMax <- max(c(scores1,scores2))
+ax <- seq(from=xMin,
+          to=xMax,
+          by=(xMax-xMin)/13)
+
+hg1 <- hist(scores1,
+            breaks=ax,
+            plot=FALSE)
+hg2 <- hist(scores2,
+            breaks=ax,
+            plot=FALSE)
+c1 <- rgb(173,216,230,
+          max=255,
+          alpha=80)
+c2 <- rgb(255,192,203,
+          max=255,
+          alpha=80)
+
+png(filename="output.png",
+    width=500,
+    height=500,
+    pointsize=16)
+plot(hg1,
+     col=c1,
+     xlim=c(xMin, xMax),
+     ylim=c(0,100),
+     main="Skeletal muscle contraction signature",
+     xlab="Score (ssGSEA)")
+plot(hg2,
+     col=c2,
+     add=TRUE)
+
+
+
+writeOut <- cbind(singScores, GSVAscores)
+write.xlsx(writeOut,
+           file="output.xlsx",
+           sheetName="Sheet1",
+           col.names=FALSE,
+           row.names=FALSE,
+           append=FALSE)
+
+```
+
+Performs statistical tests across ICTs
+```{r}
+
+
+
+
+
+```
+
+
+

@@ -1,0 +1,315 @@
+---
+title: "Untitled"
+output: html_document
+---
+
+Setup packages
+```{r}
+library(survival)
+library(dplyr)
+library(survminer)
+library(R.matlab)
+library(stringr)
+library(ggplot2)
+library(csv)
+
+setwd("E:\\Documents\\NYU\\NYU Langone\\PhD\\Feske Lab\\Experiments\\04.10.19_CancerDatabases&Analysis\\R")
+```
+
+Load matlab object
+```{r}
+
+fname <- 'E:\\Documents\\NYU\\NYU Langone\\PhD\\Misc Projects\\2020.02.15_TCGA\\2020.02.15_NeuralTumorsAnalysis\\Matlab\\2020.02.15_workspace_TCGA_neuroTumors.mat'
+
+matVar <- readMat(fname)
+
+tcgaNeuro <- matVar$tcgaNeuro
+tcgaNeuroAnnot <- matVar$tcgaNeuroAnnot
+rm(matVar)
+
+# Extracts count data
+values <- tcgaNeuro[[1]]
+
+# Extracts gene data & removes ENS genes
+genes <- tcgaNeuro[[3]]
+temp <- c()
+for (i in 1:length(genes)/3) {
+  temp <- c(temp, genes[[i]][[1]][1])
+}
+genes <- temp
+exclude <- c()
+for (i in 1:length(genes)) {
+  gene <- genes[i]
+  loc <- str_detect(gene,"ENSG00")
+  if (loc) {
+    exclude <- c(exclude, i)
+  }
+}
+genes <- genes[-exclude]
+values <- values[-exclude,]
+
+# Extracts sample information
+ids <- tcgaNeuro[[2]]
+temp <- c()
+for (i in 1:length(ids)) {
+  id <- ids[[i]][[1]][1]
+  temp <- c(temp, id)
+}
+
+# Organizes information
+rownames(values) <- genes
+colnames(values) <- ids
+removeind <- which(duplicated(genes))
+genes <- genes(-removeInd)
+values <- values[-removeInd,]
+
+```
+
+Performs survival analysis over a list of genes (based on a design matrix)
+```{r}
+
+#fname <- "E:\\Documents\\NYU\\NYU Langone\\PhD\\Feske Lab\\Experiments\\04.10.19_CancerDatabases&Analysis\\Matlab\\20200426_SurvivalDesign.mat"
+fname <- "E:\\Documents\\NYU\\NYU Langone\\PhD\\Feske Lab\\Experiments\\04.10.19_CancerDatabases&Analysis\\Matlab\\20200426_SurvivalDesign.mat"
+plotGene <- c("SLC39A7")
+#isolateCancer <- c("Precursor B-cell lymphoblastic leukemia")
+#isolateCancer <- c("Burkitt-like lymphoma", "Burkitt lymphoma, NOS (Includes all variants)")
+
+
+# Downloads & organizes data
+design <- readMat(fname)
+design <- design[[1]]
+timeStat <- design[[1]]
+geneInfo <- design[[2]]
+genes <- design[[3]]
+genes <- as.data.frame(genes)
+clinical <- design[[4]]
+clinical <- as.character(t(as.data.frame(clinical)))
+clinical <- matrix(clinical,
+                   nrow=length(geneInfo[,1]))
+genesTPM <- design[[5]]
+isolateCancer <- design[[6]]
+isolateCancer <- as.character(as.data.frame(isolateCancer))
+
+# Isolates cancer type of interest
+include <- c()
+if (!(length(isolateCancer)==0)) {
+  for (i in 1:length(isolateCancer)) {
+    cancer <- isolateCancer[i]
+    loc <- which(clinical[,5]==cancer)
+    if (!(length(loc)==0)) {
+      include <- c(include,loc)
+    }
+  }
+}
+timeStat <- timeStat[include,]
+clinical <- clinical[include,]
+geneInfo <- geneInfo[include,]
+
+# Tests survival for each gene
+time <- timeStat[,1]
+stat <- timeStat[,2]
+stat <- as.factor(stat)
+pOut <- c()
+rrOut <- c()
+genesOut <- c()
+tpmOut <- c()
+riskHighOut <- c()
+riskLowOut <- c()
+numHighOut <- c()
+numLowOut <- c()
+yr5HighOut <- c()
+yr5LowOut <- c()
+for (i in 1:length(genes[1,])) {
+  gene <- as.character(genes[1,i])
+  geneVal <- geneInfo[,i]
+  tpm <- genesTPM[i]
+  
+  # Creates temporary design matrix
+  include <- !(is.nan(geneVal))
+  tmpTime <- time[include]
+  tmpStat <- stat[include]
+  geneVal <- geneVal[include]
+  designTmp <- cbind(tmpTime, tmpStat, geneVal)
+  colnames(designTmp) <- c("Time","Status","SurvivalVar")
+  designTmp <- as.data.frame(designTmp)
+  
+  # Filters based on parameters
+  numHigh <- length(which(designTmp[,3]==1))
+  numLow <- length(which(designTmp[,3]==0))
+  if (numHigh==0 | numLow==0) {
+    next
+  }
+  
+  # Performs survival curve analysis
+  survObject <- Surv(time=designTmp$Time,
+                     event=designTmp$Stat)
+  fit1 <- survfit(survObject ~ SurvivalVar,
+                  data=designTmp)
+  pval <- surv_pvalue(fit1)
+  survSum <- surv_summary(fit1,
+                          data=designTmp)
+  
+  # Calculates relative risk
+  geneHigh <- designTmp[designTmp[,3]==1,]
+  geneLow <- designTmp[designTmp[,3]==0,]
+  geneHighDeath <- length(which(geneHigh[,2]==1))
+  geneLowDeath <- length(which(geneLow[,2]==1))
+  riskHigh <- geneHighDeath/(numHigh)
+  riskLow <- geneLowDeath/(numLow)
+  RR <- riskHigh/riskLow
+  
+  # Calculates 5-year survival for both groups
+  survSumHigh <- survSum[which(survSum[,10]==1),]
+  survSumLow <- survSum[which(survSum[,10]==0),]
+  if (max(survSumHigh[,1]) < (5*365)) {
+    yr5High <- 1
+  } else {
+    timeHigh <- survSumHigh[,1]
+    timeHigh <- timeHigh - (5*365)
+    indHigh <- which(timeHigh>0)[1]
+    yr5High <- survSumHigh[indHigh,5]
+  }
+  
+  if (max(survSumLow[,1]) < (5*365)) {
+    yr5Low <- 1
+  } else {
+    timeLow <- survSumLow[,1]
+    timeLow <- timeLow -(5*365)
+    indLow <- which(timeLow>0)[1]
+    yr5Low <- survSumLow[indLow,5]
+  }
+  
+  # Plots survival curve for indicated gene
+  loc <- which(gene==plotGene)
+  if (!(length(loc)==0)) {
+    survSumOut <- surv_summary(fit1,
+                               data=designTmp)
+  }
+  
+  # Appends information
+  pOut <- c(pOut, pval[[2]])
+  rrOut <- c(rrOut, RR)
+  genesOut <- c(genesOut, gene)
+  tpmOut <- c(tpmOut, tpm)
+  numHighOut <- c(numHighOut, numHigh)
+  numLowOut <- c(numLowOut, numLow)
+  riskHighOut <- c(riskHighOut, riskHigh)
+  riskLowOut <- c(riskLowOut, riskLow)
+  yr5HighOut <- c(yr5HighOut, yr5High)
+  yr5LowOut <- c(yr5LowOut, yr5Low)
+}
+
+adj.pOut <- p.adjust(pOut,
+                     method=p.adjust.methods,
+                     n=length(pOut))
+logrrOut <- log2(rrOut)
+logpVal <- -log10(pOut)
+logAdjPval <- -log10(adj.pOut)
+output <- cbind(rrOut,
+                logrrOut,
+                tpmOut,
+                pOut,
+                logpVal,
+                adj.pOut,
+                logAdjPval,
+                numHighOut,
+                numLowOut,
+                riskHighOut,
+                riskLowOut,
+                yr5HighOut,
+                yr5LowOut)
+rownames(output) <- genesOut
+
+write.table(output,
+            file="output.txt",
+            append=FALSE,
+            quote=FALSE,
+            sep="\t")
+
+```
+
+Plot survival curve for the indicated gene
+```{r}
+
+fname <- "E:\\Documents\\NYU\\NYU Langone\\PhD\\Feske Lab\\Experiments\\04.10.19_CancerDatabases&Analysis\\Matlab\\20200426_SurvivalDesign.mat"
+plotGene <- "CD40"
+
+# Downloads & organizes data
+design <- readMat(fname)
+design <- design[[1]]
+timeStat <- design[[1]]
+geneInfo <- design[[2]]
+genes <- design[[3]]
+genes <- as.data.frame(genes)
+clinical <- design[[4]]
+clinical <- as.character(t(as.data.frame(clinical)))
+clinical <- matrix(clinical,
+                   nrow=length(geneInfo[,1]))
+genesTPM <- design[[5]]
+isolateCancer <- design[[6]]
+isolateCancer <- as.character(as.data.frame(isolateCancer))
+
+# Isolates cancer type of interest
+include <- c()
+if (!(length(isolateCancer)==0)) {
+  for (i in 1:length(isolateCancer)) {
+    cancer <- isolateCancer[i]
+    loc <- which(clinical[,5]==cancer)
+    if (!(length(loc)==0)) {
+      include <- c(include,loc)
+    }
+  }
+}
+timeStat <- timeStat[include,]
+clinical <- clinical[include,]
+geneInfo <- geneInfo[include,]
+
+# Tests survival for each gene
+time <- timeStat[,1]
+stat <- timeStat[,2]
+stat <- as.factor(stat)
+
+# Acquires gene information
+loc <- which(genes==plotGene)
+geneVal <- geneInfo[,loc]
+include <- !(is.nan(geneVal))
+time <- time[include]
+stat <- stat[include]
+geneVal <- geneVal[include]
+designTmp <- cbind(time,stat,geneVal)
+colnames(designTmp) <- c("Time","Status","SurvivalVar")
+designTmp <- as.data.frame(designTmp)
+
+# Creates survival object
+survObject <- Surv(time=designTmp$Time,
+                   event=designTmp$Stat)
+fit1 <- survfit(survObject ~ SurvivalVar,
+                data=designTmp)
+
+png(filename="output.png",
+    width=500,
+    height=500,
+    pointsize=16)
+ggsurvplot(fit1,
+           data=designTmp,
+           legend.title="",
+           legend.labs=c("Low","High"),
+           title=plotGene,
+           font.main=c(20),
+           font.x=c(20),
+           font.y=c(20),
+           font.tickslab=(c(20)),
+           ggtheme=theme(plot.title=element_text(hjust=0.5),
+                         panel.background=element_rect(fill="white",colour="black")))
+
+shell.exec("output.png")
+
+
+
+```
+
+
+
+
+
+
